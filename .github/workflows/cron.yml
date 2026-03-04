@@ -1,0 +1,47 @@
+# ============================================================
+# Echo AI — GitHub Actions: 每日自动采集与处理
+# 触发时间: UTC 00:00 (北京时间 08:00)
+# ============================================================
+
+name: Daily Echo Pipeline
+
+on:
+  schedule:
+    # 每天 UTC 00:00 运行 (北京时间 08:00)
+    - cron: "0 0 * * *"
+  workflow_dispatch: # 支持手动触发
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+
+jobs:
+  fetch-and-process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run data fetch script
+        run: npx tsx scripts/fetch-posts.ts
+
+      - name: Run processing pipeline
+        run: npx tsx scripts/run-pipeline.ts
+
+      - name: Report results
+        if: always()
+        run: |
+          echo "::notice::Echo daily pipeline completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"

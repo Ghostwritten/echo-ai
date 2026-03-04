@@ -1,0 +1,46 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#6366f1', 'primaryTextColor': '#fff', 'primaryBorderColor': '#4f46e5', 'lineColor': '#a5b4fc', 'secondaryColor': '#f0abfc', 'tertiaryColor': '#e0e7ff'}}}%%
+
+flowchart TD
+    subgraph Trigger["⏰ GitHub Actions Cron (每日定时)"]
+        A[cron.yml 触发]
+    end
+
+    subgraph Ingestion["📥 数据采集层"]
+        B[X/Twitter API 抓取原始推文]
+        C[RSS / 自定义源采集]
+    end
+
+    subgraph Pipeline["🧠 AI 处理流水线 — processPipeline.ts"]
+        direction TB
+        D["1️⃣ 预过滤 (Pre-filter)\n去重 / 去广告 / 语言筛选"]
+        E["2️⃣ 情感分析 (Sentiment)\nGPT-4o mini → is_negative"]
+        F["3️⃣ 相关性打分 (Relevance)\nGPT-4o → relevance_score 0-100"]
+        G["4️⃣ 摘要生成 (Summary)\nEcho Persona 视角\nGPT-4o → summary"]
+        H["5️⃣ Embedding 生成\ntext-embedding-3-small → vector"]
+        D --> E --> F --> G --> H
+    end
+
+    subgraph Storage["💾 Supabase 存储层"]
+        I[(posts 表\n含 pgvector 列)]
+        J[(daily_briefings 表\n每日简报快照)]
+    end
+
+    subgraph Frontend["🖥️ Next.js 14 前端"]
+        K[Dashboard 首页\nEcho 今日简报]
+        L[内容流 — PostCard 组件\n视觉分层 + 情绪过滤]
+        M[语义搜索\npgvector 近似查询]
+        N[PWA 离线模式\nnext-pwa + Service Worker]
+    end
+
+    A --> B & C
+    B & C --> D
+    H --> I & J
+    I --> K & L & M
+    J --> K
+    L --> N
+
+    style Trigger fill:#1e1b4b,stroke:#6366f1,color:#e0e7ff
+    style Ingestion fill:#1e3a5f,stroke:#38bdf8,color:#e0f2fe
+    style Pipeline fill:#312e81,stroke:#818cf8,color:#e0e7ff
+    style Storage fill:#064e3b,stroke:#34d399,color:#d1fae5
+    style Frontend fill:#4a1d96,stroke:#a78bfa,color:#ede9fe
