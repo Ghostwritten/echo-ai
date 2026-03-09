@@ -42,3 +42,9 @@ next-env.d.ts
 
 # Vercel
 .vercel
+
+# Temp scripts & screenshots
+scripts/setup-db.js
+scripts/find-region*.js
+*.png
+!public/*.png

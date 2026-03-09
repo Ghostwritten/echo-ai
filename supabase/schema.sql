@@ -15,7 +15,7 @@ CREATE TABLE posts (
   id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
 
   -- 原始内容
-  source        TEXT NOT NULL DEFAULT 'x',          -- 来源平台: 'x', 'rss', 'custom'
+  source        TEXT NOT NULL DEFAULT 'hackernews',   -- 来源: 'hackernews', 'reddit', 'rss', 'github', 'custom'
   source_id     TEXT UNIQUE,                        -- 原始平台 ID (用于去重)
   author_handle TEXT,                               -- 原作者 @handle
   author_name   TEXT,                               -- 原作者显示名
@@ -32,7 +32,7 @@ CREATE TABLE posts (
   topics            TEXT[] DEFAULT '{}',            -- AI 提取的主题标签
 
   -- 向量
-  embedding         vector(1536),                   -- text-embedding-3-small 输出维度
+  embedding         vector(1024),                   -- Jina jina-embeddings-v3 输出维度
 
   -- 元数据
   fetched_at        TIMESTAMPTZ DEFAULT NOW(),      -- 采集时间
@@ -63,7 +63,7 @@ CREATE TABLE daily_briefings (
   greeting      TEXT NOT NULL,                       -- Echo 的每日问候语
   highlights    JSONB NOT NULL DEFAULT '[]',         -- 精选条目 [{post_id, title, reason}]
   stats         JSONB NOT NULL DEFAULT '{}',         -- 统计 {total, high_score, negative_filtered}
-  generated_by  TEXT DEFAULT 'gpt-4o',               -- 生成模型
+  generated_by  TEXT DEFAULT 'deepseek-chat',       -- 生成模型
   created_at    TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -89,7 +89,7 @@ CREATE TABLE user_preferences (
 -- 5. RPC: 语义搜索函数
 -- ============================================================
 CREATE OR REPLACE FUNCTION match_posts(
-  query_embedding vector(1536),
+  query_embedding vector(1024),
   match_threshold FLOAT DEFAULT 0.72,
   match_count     INT   DEFAULT 20,
   filter_negative BOOLEAN DEFAULT TRUE

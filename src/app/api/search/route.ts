@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
-import OpenAI from "openai";
 
 export async function POST(request: Request) {
   try {
@@ -13,14 +12,38 @@ export async function POST(request: Request) {
       );
     }
 
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+    // 使用 Jina AI 生成查询向量
+    const JINA_API_KEY = process.env.JINA_API_KEY;
+    if (!JINA_API_KEY) {
+      return NextResponse.json(
+        { error: "JINA_API_KEY 未配置" },
+        { status: 503 }
+      );
+    }
 
-    // 生成查询向量
-    const embeddingRes = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: query,
+    const embeddingRes = await fetch("https://api.jina.ai/v1/embeddings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${JINA_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "jina-embeddings-v3",
+        task: "text-matching",
+        dimensions: 1024,
+        input: [query],
+      }),
     });
-    const queryEmbedding = embeddingRes.data[0].embedding;
+
+    if (!embeddingRes.ok) {
+      return NextResponse.json(
+        { error: "Embedding 生成失败" },
+        { status: 502 }
+      );
+    }
+
+    const embData = await embeddingRes.json();
+    const queryEmbedding = embData.data[0].embedding;
 
     // 调用 Supabase RPC 函数进行语义搜索
     const supabase = createServerClient();

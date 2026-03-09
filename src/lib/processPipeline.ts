@@ -1,6 +1,7 @@
 // ============================================================
 // Echo AI — 数据处理流水线
-// 执行顺序: 预过滤 → 情感分析 → 相关性打分 → 摘要生成 → Embedding → 入库
+// AI 模型: DeepSeek (摘要/打分/情感) + Jina AI (Embedding)
+// 数据源: Hacker News / Reddit / RSS / GitHub Trending
 // ============================================================
 
 import { createClient } from "@supabase/supabase-js";
@@ -8,22 +9,27 @@ import OpenAI from "openai";
 import { ECHO_SYSTEM_PROMPT } from "./echo-persona";
 
 // ----------------------------------------------------------
-// 客户端初始化 (无泛型, 避免与 RPC/upsert 的类型冲突)
+// 客户端初始化
 // ----------------------------------------------------------
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
+// DeepSeek (兼容 OpenAI SDK, 改 baseURL 即可)
+const deepseek = new OpenAI({
+  apiKey: process.env.DEEPSEEK_API_KEY!,
+  baseURL: "https://api.deepseek.com",
 });
+
+// Jina AI Embedding
+const JINA_API_KEY = process.env.JINA_API_KEY!;
 
 // ----------------------------------------------------------
 // 类型定义
 // ----------------------------------------------------------
-interface RawPost {
-  source: "x" | "rss" | "custom";
+export interface RawPost {
+  source: "hackernews" | "reddit" | "rss" | "github" | "custom";
   source_id: string;
   author_handle?: string;
   author_name?: string;
@@ -45,10 +51,8 @@ interface ProcessedPost extends RawPost {
 
 // ----------------------------------------------------------
 // Step 1: 预过滤 (Pre-filter)
-// 去重 / 去广告 / 最小内容长度
 // ----------------------------------------------------------
 async function preFilter(posts: RawPost[]): Promise<RawPost[]> {
-  // 查询已存在的 source_id 进行去重
   const sourceIds = posts.map((p) => p.source_id).filter(Boolean);
   const { data: existing } = await supabase
     .from("posts")
@@ -58,11 +62,8 @@ async function preFilter(posts: RawPost[]): Promise<RawPost[]> {
   const existingIds = new Set(existing?.map((e: any) => e.source_id) ?? []);
 
   return posts.filter((post) => {
-    // 去重
     if (existingIds.has(post.source_id)) return false;
-    // 最小内容长度
     if (post.content.trim().length < 20) return false;
-    // 基础广告过滤 (可扩展)
     const adPatterns = /(?:sponsored|promoted|#ad\b|buy now|limited offer)/i;
     if (adPatterns.test(post.content)) return false;
     return true;
@@ -70,13 +71,13 @@ async function preFilter(posts: RawPost[]): Promise<RawPost[]> {
 }
 
 // ----------------------------------------------------------
-// Step 2: 情感分析 (Sentiment Analysis) — GPT-4o mini
+// Step 2: 情感分析 — DeepSeek
 // ----------------------------------------------------------
 async function analyzeSentiment(
   content: string
 ): Promise<{ sentiment_label: "positive" | "negative" | "neutral"; is_negative: boolean }> {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+  const response = await deepseek.chat.completions.create({
+    model: "deepseek-chat",
     temperature: 0,
     response_format: { type: "json_object" },
     messages: [
@@ -95,14 +96,14 @@ async function analyzeSentiment(
 }
 
 // ----------------------------------------------------------
-// Step 3: 相关性打分 (Relevance Scoring) — GPT-4o
+// Step 3: 相关性打分 — DeepSeek
 // ----------------------------------------------------------
 async function scoreRelevance(
   content: string,
   userInterests: string[]
 ): Promise<{ relevance_score: number; relevance_reason: string; topics: string[] }> {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o",
+  const response = await deepseek.chat.completions.create({
+    model: "deepseek-chat",
     temperature: 0.2,
     response_format: { type: "json_object" },
     messages: [
@@ -132,11 +133,11 @@ async function scoreRelevance(
 }
 
 // ----------------------------------------------------------
-// Step 4: 摘要生成 (Summary Generation) — GPT-4o + Echo Persona
+// Step 4: 摘要生成 — DeepSeek + Echo Persona
 // ----------------------------------------------------------
 async function generateSummary(content: string): Promise<string> {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o",
+  const response = await deepseek.chat.completions.create({
+    model: "deepseek-chat",
     temperature: 0.7,
     max_tokens: 300,
     messages: [
@@ -152,15 +153,30 @@ async function generateSummary(content: string): Promise<string> {
 }
 
 // ----------------------------------------------------------
-// Step 5: Embedding 生成
+// Step 5: Embedding — Jina AI
+// jina-embeddings-v3 输出 1024 维, 需调整 pgvector 列维度
 // ----------------------------------------------------------
 async function generateEmbedding(text: string): Promise<number[]> {
-  const response = await openai.embeddings.create({
-    model: "text-embedding-3-small",
-    input: text,
+  const response = await fetch("https://api.jina.ai/v1/embeddings", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${JINA_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "jina-embeddings-v3",
+      task: "text-matching",
+      dimensions: 1024,
+      input: [text],
+    }),
   });
 
-  return response.data[0].embedding;
+  if (!response.ok) {
+    throw new Error(`Jina Embedding 失败: ${response.status} ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  return data.data[0].embedding;
 }
 
 // ----------------------------------------------------------
@@ -182,7 +198,7 @@ async function upsertPosts(posts: ProcessedPost[]): Promise<void> {
       sentiment_label: p.sentiment_label,
       is_negative: p.is_negative,
       topics: p.topics,
-      embedding: p.embedding as any, // pgvector 接受 number[]
+      embedding: p.embedding as any,
       processed_at: p.processed_at,
     })),
     { onConflict: "source_id" }
@@ -197,7 +213,6 @@ async function upsertPosts(posts: ProcessedPost[]): Promise<void> {
 async function generateDailyBriefing(): Promise<void> {
   const today = new Date().toISOString().split("T")[0];
 
-  // 获取今日高分内容
   const { data: topPosts } = await supabase
     .from("posts")
     .select("id, summary, relevance_score, relevance_reason, topics")
@@ -206,7 +221,6 @@ async function generateDailyBriefing(): Promise<void> {
     .order("relevance_score", { ascending: false })
     .limit(5);
 
-  // 获取今日统计
   const { count: total } = await supabase
     .from("posts")
     .select("*", { count: "exact", head: true })
@@ -218,9 +232,8 @@ async function generateDailyBriefing(): Promise<void> {
     .gte("created_at", `${today}T00:00:00Z`)
     .eq("is_negative", true);
 
-  // 让 Echo 生成问候语
-  const greetingResponse = await openai.chat.completions.create({
-    model: "gpt-4o",
+  const greetingResponse = await deepseek.chat.completions.create({
+    model: "deepseek-chat",
     temperature: 0.8,
     max_tokens: 200,
     messages: [
@@ -261,11 +274,9 @@ export async function processPipeline(rawPosts: RawPost[]): Promise<{
 }> {
   console.log(`📥 收到 ${rawPosts.length} 条原始数据`);
 
-  // Step 1: 预过滤
   const filtered = await preFilter(rawPosts);
   console.log(`🔍 预过滤后剩余 ${filtered.length} 条`);
 
-  // 获取用户兴趣 (取第一个用户的偏好, 单用户场景)
   const { data: prefs } = await supabase
     .from("user_preferences")
     .select("interest_keywords")
@@ -274,22 +285,17 @@ export async function processPipeline(rawPosts: RawPost[]): Promise<{
 
   const interests = prefs?.interest_keywords ?? ["AI", "科技", "创业", "开源"];
 
-  // Step 2-5: 并行处理每条内容
   const processed: ProcessedPost[] = [];
-  const BATCH_SIZE = 5; // 并发控制
+  const BATCH_SIZE = 5;
 
   for (let i = 0; i < filtered.length; i += BATCH_SIZE) {
     const batch = filtered.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(
       batch.map(async (post) => {
         try {
-          // 2: 情感分析
           const sentiment = await analyzeSentiment(post.content);
-          // 3: 相关性打分
           const relevance = await scoreRelevance(post.content, interests);
-          // 4: 摘要生成
           const summary = await generateSummary(post.content);
-          // 5: Embedding
           const embedding = await generateEmbedding(post.content);
 
           return {
@@ -311,13 +317,11 @@ export async function processPipeline(rawPosts: RawPost[]): Promise<{
     console.log(`⚙️  已处理 ${Math.min(i + BATCH_SIZE, filtered.length)}/${filtered.length}`);
   }
 
-  // Step 6: 入库
   if (processed.length > 0) {
     await upsertPosts(processed);
     console.log(`💾 成功入库 ${processed.length} 条`);
   }
 
-  // 生成每日简报
   await generateDailyBriefing();
   console.log(`📋 每日简报已更新`);
 

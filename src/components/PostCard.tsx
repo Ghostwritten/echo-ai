@@ -28,7 +28,7 @@ import { zhCN } from "date-fns/locale";
 // ----------------------------------------------------------
 export interface Post {
   id: string;
-  source: "x" | "rss" | "custom";
+  source: "hackernews" | "reddit" | "rss" | "github" | "custom";
   source_id: string | null;
   author_handle: string | null;
   author_name: string | null;
