@@ -4,26 +4,43 @@
 // 数据源: Hacker News / Reddit / RSS / GitHub Trending
 // ============================================================
 
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 import { ECHO_SYSTEM_PROMPT } from "./echo-persona";
 
 // ----------------------------------------------------------
-// 客户端初始化
+// 客户端懒初始化 (确保 dotenv 已加载后再读取 env)
 // ----------------------------------------------------------
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+let _supabase: SupabaseClient;
+let _deepseek: OpenAI;
+let _jinaKey: string;
 
-// DeepSeek (兼容 OpenAI SDK, 改 baseURL 即可)
-const deepseek = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY!,
-  baseURL: "https://api.deepseek.com",
-});
+function getSupabase() {
+  if (!_supabase) {
+    _supabase = createClient(
+      process.env.SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
+  }
+  return _supabase;
+}
 
-// Jina AI Embedding
-const JINA_API_KEY = process.env.JINA_API_KEY!;
+function getDeepseek() {
+  if (!_deepseek) {
+    _deepseek = new OpenAI({
+      apiKey: process.env.DEEPSEEK_API_KEY!,
+      baseURL: "https://api.deepseek.com",
+    });
+  }
+  return _deepseek;
+}
+
+function getJinaKey() {
+  if (!_jinaKey) {
+    _jinaKey = process.env.JINA_API_KEY!;
+  }
+  return _jinaKey;
+}
 
 // ----------------------------------------------------------
 // 类型定义
@@ -54,7 +71,7 @@ interface ProcessedPost extends RawPost {
 // ----------------------------------------------------------
 async function preFilter(posts: RawPost[]): Promise<RawPost[]> {
   const sourceIds = posts.map((p) => p.source_id).filter(Boolean);
-  const { data: existing } = await supabase
+  const { data: existing } = await getSupabase()
     .from("posts")
     .select("source_id")
     .in("source_id", sourceIds);
@@ -76,7 +93,7 @@ async function preFilter(posts: RawPost[]): Promise<RawPost[]> {
 async function analyzeSentiment(
   content: string
 ): Promise<{ sentiment_label: "positive" | "negative" | "neutral"; is_negative: boolean }> {
-  const response = await deepseek.chat.completions.create({
+  const response = await getDeepseek().chat.completions.create({
     model: "deepseek-chat",
     temperature: 0,
     response_format: { type: "json_object" },
@@ -102,7 +119,7 @@ async function scoreRelevance(
   content: string,
   userInterests: string[]
 ): Promise<{ relevance_score: number; relevance_reason: string; topics: string[] }> {
-  const response = await deepseek.chat.completions.create({
+  const response = await getDeepseek().chat.completions.create({
     model: "deepseek-chat",
     temperature: 0.2,
     response_format: { type: "json_object" },
@@ -136,7 +153,7 @@ async function scoreRelevance(
 // Step 4: 摘要生成 — DeepSeek + Echo Persona
 // ----------------------------------------------------------
 async function generateSummary(content: string): Promise<string> {
-  const response = await deepseek.chat.completions.create({
+  const response = await getDeepseek().chat.completions.create({
     model: "deepseek-chat",
     temperature: 0.7,
     max_tokens: 300,
@@ -161,7 +178,7 @@ async function generateEmbedding(text: string): Promise<number[]> {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${JINA_API_KEY}`,
+      Authorization: `Bearer ${getJinaKey()}`,
     },
     body: JSON.stringify({
       model: "jina-embeddings-v3",
@@ -183,8 +200,15 @@ async function generateEmbedding(text: string): Promise<number[]> {
 // Step 6: 批量入库
 // ----------------------------------------------------------
 async function upsertPosts(posts: ProcessedPost[]): Promise<void> {
-  const { error } = await supabase.from("posts").upsert(
-    posts.map((p) => ({
+  // 按 source_id 去重 (同一批次中可能存在重复)
+  const uniqueMap = new Map<string, ProcessedPost>();
+  for (const p of posts) {
+    uniqueMap.set(p.source_id, p);
+  }
+  const uniquePosts = Array.from(uniqueMap.values());
+
+  const { error } = await getSupabase().from("posts").upsert(
+    uniquePosts.map((p) => ({
       source: p.source,
       source_id: p.source_id,
       author_handle: p.author_handle ?? null,
@@ -213,7 +237,7 @@ async function upsertPosts(posts: ProcessedPost[]): Promise<void> {
 async function generateDailyBriefing(): Promise<void> {
   const today = new Date().toISOString().split("T")[0];
 
-  const { data: topPosts } = await supabase
+  const { data: topPosts } = await getSupabase()
     .from("posts")
     .select("id, summary, relevance_score, relevance_reason, topics")
     .gte("created_at", `${today}T00:00:00Z`)
@@ -221,18 +245,18 @@ async function generateDailyBriefing(): Promise<void> {
     .order("relevance_score", { ascending: false })
     .limit(5);
 
-  const { count: total } = await supabase
+  const { count: total } = await getSupabase()
     .from("posts")
     .select("*", { count: "exact", head: true })
     .gte("created_at", `${today}T00:00:00Z`);
 
-  const { count: negativeCount } = await supabase
+  const { count: negativeCount } = await getSupabase()
     .from("posts")
     .select("*", { count: "exact", head: true })
     .gte("created_at", `${today}T00:00:00Z`)
     .eq("is_negative", true);
 
-  const greetingResponse = await deepseek.chat.completions.create({
+  const greetingResponse = await getDeepseek().chat.completions.create({
     model: "deepseek-chat",
     temperature: 0.8,
     max_tokens: 200,
@@ -246,7 +270,7 @@ async function generateDailyBriefing(): Promise<void> {
     ],
   });
 
-  await supabase.from("daily_briefings").upsert(
+  await getSupabase().from("daily_briefings").upsert(
     {
       briefing_date: today,
       greeting: greetingResponse.choices[0].message.content!.trim(),
@@ -277,7 +301,7 @@ export async function processPipeline(rawPosts: RawPost[]): Promise<{
   const filtered = await preFilter(rawPosts);
   console.log(`🔍 预过滤后剩余 ${filtered.length} 条`);
 
-  const { data: prefs } = await supabase
+  const { data: prefs } = await getSupabase()
     .from("user_preferences")
     .select("interest_keywords")
     .limit(1)
@@ -286,7 +310,7 @@ export async function processPipeline(rawPosts: RawPost[]): Promise<{
   const interests = prefs?.interest_keywords ?? ["AI", "科技", "创业", "开源"];
 
   const processed: ProcessedPost[] = [];
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = 2; // Jina 免费版并发限制为 2, 保守设置
 
   for (let i = 0; i < filtered.length; i += BATCH_SIZE) {
     const batch = filtered.slice(i, i + BATCH_SIZE);

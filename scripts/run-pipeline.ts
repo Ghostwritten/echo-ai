@@ -3,6 +3,13 @@
 // 用法: npx tsx scripts/run-pipeline.ts
 // ============================================================
 
+import "dotenv/config";
+import * as path from "path";
+import * as dotenv from "dotenv";
+
+// 加载 .env.local (Next.js 约定, tsx 不会自动加载)
+dotenv.config({ path: path.resolve(__dirname, "..", ".env.local") });
+
 import { processPipeline } from "../src/lib/processPipeline";
 import * as fs from "fs";
 
